@@ -223,3 +223,189 @@ impl fmt::Display for RegexLexerError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lexer_simple() {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Tok {
+            Whitespace,
+            NonWhitespace,
+        }
+
+        #[rustfmt::skip]
+        let rules = [
+            (r"\s+", Tok::Whitespace),
+            (r"\S+", Tok::NonWhitespace),
+        ];
+        let lexer = RegexLexer::new(rules).unwrap();
+
+        let text = "foo bar   baz\tqux \r\n\tquux ";
+        assert_tokens(
+            lexer.tokens(text),
+            [
+                (Some(Tok::NonWhitespace), (0, 3, "foo")),
+                (Some(Tok::Whitespace), (3, 4, " ")),
+                (Some(Tok::NonWhitespace), (4, 7, "bar")),
+                (Some(Tok::Whitespace), (7, 10, "   ")),
+                (Some(Tok::NonWhitespace), (10, 13, "baz")),
+                (Some(Tok::Whitespace), (13, 14, "\t")),
+                (Some(Tok::NonWhitespace), (14, 17, "qux")),
+                (Some(Tok::Whitespace), (17, 21, " \r\n\t")),
+                (Some(Tok::NonWhitespace), (21, 25, "quux")),
+                (Some(Tok::Whitespace), (25, 26, " ")),
+            ],
+        );
+        assert_spans(text, &lexer);
+    }
+
+    #[test]
+    fn test_lexer_lines() {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Tok {
+            Comment,
+            Line,
+        }
+
+        #[rustfmt::skip]
+        let rules = [
+            (r"//.*$", Tok::Comment),
+            (r".+$", Tok::Line),
+        ];
+        let lexer = RegexLexer::new(rules).unwrap();
+
+        let text = "// This is comment
+This is a test
+// This is another comment\n\n";
+        assert_tokens(
+            lexer.tokens(text),
+            [
+                (Some(Tok::Comment), (0, 18, "// This is comment")),
+                (None, (18, 19, "\n")),
+                (Some(Tok::Line), (19, 33, "This is a test")),
+                (None, (33, 34, "\n")),
+                (Some(Tok::Comment), (34, 60, "// This is another comment")),
+                (None, (60, 62, "\n\n")),
+            ],
+        );
+        assert_spans(text, &lexer);
+    }
+
+    #[test]
+    fn test_lexer_unknown() {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Tok {
+            Whitespace,
+            Alphabetic,
+        }
+
+        let rules = [
+            (r"\s+", Tok::Whitespace),
+            (r"[[:alpha:]]+", Tok::Alphabetic),
+        ];
+        let lexer = RegexLexer::new(rules).unwrap();
+
+        // Unknown at the start
+        let text = "1234 \t56 foo 78 bar";
+        assert_tokens(
+            lexer.tokens(text),
+            [
+                (None, (0, 4, "1234")),
+                (Some(Tok::Whitespace), (4, 6, " \t")),
+                (None, (6, 8, "56")),
+                (Some(Tok::Whitespace), (8, 9, " ")),
+                (Some(Tok::Alphabetic), (9, 12, "foo")),
+                (Some(Tok::Whitespace), (12, 13, " ")),
+                (None, (13, 15, "78")),
+                (Some(Tok::Whitespace), (15, 16, " ")),
+                (Some(Tok::Alphabetic), (16, 19, "bar")),
+            ],
+        );
+        assert_spans(text, &lexer);
+
+        // Unknown in between
+        let text = "foo 123 456 \tbar";
+        assert_tokens(
+            lexer.tokens(text),
+            [
+                (Some(Tok::Alphabetic), (0, 3, "foo")),
+                (Some(Tok::Whitespace), (3, 4, " ")),
+                (None, (4, 7, "123")),
+                (Some(Tok::Whitespace), (7, 8, " ")),
+                (None, (8, 11, "456")),
+                (Some(Tok::Whitespace), (11, 13, " \t")),
+                (Some(Tok::Alphabetic), (13, 16, "bar")),
+            ],
+        );
+        assert_spans(text, &lexer);
+
+        // Unknown at the end
+        let text = "foo 12   bar 345";
+        assert_tokens(
+            lexer.tokens(text),
+            [
+                (Some(Tok::Alphabetic), (0, 3, "foo")),
+                (Some(Tok::Whitespace), (3, 4, " ")),
+                (None, (4, 6, "12")),
+                (Some(Tok::Whitespace), (6, 9, "   ")),
+                (Some(Tok::Alphabetic), (9, 12, "bar")),
+                (Some(Tok::Whitespace), (12, 13, " ")),
+                (None, (13, 16, "345")),
+            ],
+        );
+        assert_spans(text, &lexer);
+    }
+
+    #[test]
+    fn test_lexer_no_rules() {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Tok {
+            Whitespace,
+            NonWhitespace,
+        }
+
+        let lexer = RegexLexer::<Tok>::new::<&str, _>([]).unwrap();
+
+        let text = "foo bar\n\tbaz";
+        assert_tokens(lexer.tokens(text), [(None, (0, text.len(), text))]);
+        assert_spans(text, &lexer);
+    }
+
+    fn assert_tokens<'a, Tok>(
+        actual_tokens: impl IntoIterator<Item = (Option<Tok>, TokenSpan<'a>)>,
+        expected_tokens: impl IntoIterator<Item = (Option<Tok>, (usize, usize, &'a str))>,
+    ) where
+        Tok: PartialEq + fmt::Debug,
+    {
+        let mut actual_tokens = actual_tokens.into_iter();
+        let expected_tokens = expected_tokens.into_iter();
+
+        for (expected_tok, expected_span) in expected_tokens {
+            let (tok, span) = actual_tokens.next().unwrap();
+
+            assert_eq!(tok, expected_tok);
+            assert_eq!(span.start(), expected_span.0);
+            assert_eq!(span.end(), expected_span.1);
+            assert_eq!(span.as_str(), expected_span.2);
+        }
+
+        assert_eq!(actual_tokens.next(), None);
+    }
+
+    fn assert_spans<'a, Tok>(text: &'a str, lexer: &RegexLexer<Tok>)
+    where
+        Tok: Clone,
+    {
+        let mut end = 0;
+
+        for (_tok, span) in lexer.tokens(text) {
+            assert_eq!(span.as_str(), &text[span.start()..span.end()]);
+            end = span.end();
+        }
+
+        assert_eq!(end, text.len());
+    }
+}
