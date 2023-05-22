@@ -86,8 +86,12 @@ where
     {
         let rules = rules
             .into_iter()
-            .map(|(pat, tok)| {
+            .enumerate()
+            .map(|(i, (pat, tok))| {
                 let re = compile_rule(pat.as_ref())?;
+                if re.is_match("") {
+                    return Err(RegexLexerError::EmptyMatch(i));
+                }
                 Ok((re, tok))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -206,12 +210,14 @@ fn compile_rule(pattern: &str) -> Result<Regex, RegexLexerError> {
 #[derive(Clone, Debug)]
 pub enum RegexLexerError {
     InvalidRegex(RegexError),
+    EmptyMatch(usize),
 }
 
 impl error::Error for RegexLexerError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
             Self::InvalidRegex(err) => Some(err),
+            Self::EmptyMatch(_) => None,
         }
     }
 }
@@ -220,6 +226,7 @@ impl fmt::Display for RegexLexerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRegex(err) => write!(f, "invalid regex: {}", err),
+            Self::EmptyMatch(i) => write!(f, "empty match for rule {}", i),
         }
     }
 }
@@ -372,6 +379,33 @@ This is a test
         let text = "foo bar\n\tbaz";
         assert_tokens(lexer.tokens(text), [(None, (0, text.len(), text))]);
         assert_spans(text, &lexer);
+    }
+
+    #[test]
+    fn test_lexer_error_empty_match() {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Tok {
+            NonEmpty,
+            Empty,
+        }
+
+        let err = RegexLexer::new([(r"", Tok::Empty)]).unwrap_err();
+        match err {
+            RegexLexerError::EmptyMatch(0) => {}
+            _ => panic!("{:?}", err),
+        }
+
+        let err = RegexLexer::new([(r".*", Tok::Empty)]).unwrap_err();
+        match err {
+            RegexLexerError::EmptyMatch(0) => {}
+            _ => panic!("{:?}", err),
+        }
+
+        let err = RegexLexer::new([(r".+", Tok::NonEmpty), (r".*", Tok::Empty)]).unwrap_err();
+        match err {
+            RegexLexerError::EmptyMatch(1) => {}
+            _ => panic!("{:?}", err),
+        }
     }
 
     fn assert_tokens<'a, Tok>(
