@@ -12,6 +12,18 @@ use std::ops::{ControlFlow, Range};
 
 use regex::{Match, Regex, RegexBuilder};
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub struct LineCol {
+    /// The 1-indexed line in the text on which the token starts or ends (inclusive).
+    pub line: usize,
+    /// The 1-indexed column in the text (in UTF-8 characters) on which the token starts or ends (inclusive).
+    pub col: usize,
+}
+
+impl LineCol {
+    const START: Self = Self { line: 1, col: 1 };
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub struct TokenSpan<'text> {
     text: &'text str,
@@ -102,6 +114,13 @@ where
     pub fn tokens<'lexer, 'text>(&'lexer self, text: &'text str) -> Tokens<'lexer, 'text, Tok> {
         Tokens::new(self, text)
     }
+
+    pub fn positioned_tokens<'lexer, 'text>(
+        &'lexer self,
+        text: &'text str,
+    ) -> PositionedTokens<'lexer, 'text, Tok> {
+        Tokens::new(self, text).positioned()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +146,11 @@ where
             rest: text,
             at: 0,
         }
+    }
+
+    #[inline]
+    pub fn positioned(self) -> PositionedTokens<'lexer, 'text, Tok> {
+        PositionedTokens::new(self)
     }
 }
 
@@ -199,6 +223,52 @@ where
 }
 
 impl<'lexer, 'text, Tok> FusedIterator for Tokens<'lexer, 'text, Tok> where Tok: Clone {}
+
+#[derive(Clone, Debug)]
+pub struct PositionedTokens<'lexer, 'text, Tok>
+where
+    Tok: Clone,
+{
+    tokens: Tokens<'lexer, 'text, Tok>,
+    loc: LineCol,
+}
+
+impl<'lexer, 'text, Tok> PositionedTokens<'lexer, 'text, Tok>
+where
+    Tok: Clone,
+{
+    fn new(tokens: Tokens<'lexer, 'text, Tok>) -> Self {
+        Self {
+            tokens,
+            loc: LineCol::START,
+        }
+    }
+}
+
+impl<'lexer, 'text, Tok> Iterator for PositionedTokens<'lexer, 'text, Tok>
+where
+    Tok: Clone,
+{
+    type Item = (Option<Tok>, TokenSpan<'text>, (LineCol, LineCol));
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (tok, span) = self.tokens.next()?;
+
+        let start = self.loc;
+        for c in span.as_str().chars() {
+            if c == '\n' {
+                self.loc.line += 1;
+                self.loc.col = LineCol::START.col;
+            } else {
+                self.loc.col += 1;
+            }
+        }
+
+        Some((tok, span, (start, self.loc)))
+    }
+}
+
+impl<'lexer, 'text, Tok> FusedIterator for PositionedTokens<'lexer, 'text, Tok> where Tok: Clone {}
 
 fn compile_rule(pattern: &str) -> Result<Regex, RegexLexerError> {
     RegexBuilder::new(pattern)
@@ -364,6 +434,121 @@ This is a test
             ],
         );
         assert_spans(text, &lexer);
+    }
+
+    #[test]
+    fn test_lexer_positioned_tokens() {
+        #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+        enum Tok {
+            Space,
+            Let,
+            Fn,
+            Name,
+            SimpleString,
+        }
+
+        let rules = [
+            (r"\s+", Tok::Space),
+            (r"let", Tok::Let),
+            (r"fn", Tok::Fn),
+            (r"\w+", Tok::Name),
+            ("\".*?\"", Tok::SimpleString),
+        ];
+        let lexer = RegexLexer::new(rules).unwrap();
+
+        let text = r#"fn main() {
+    println!("Hello World");
+}"#;
+        let mut tokens = lexer.tokens(text).positioned();
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Fn));
+        assert_eq!((span.start(), span.end(), span.as_str()), (0, 2, "fn"));
+        assert_eq!((start.line, start.col), (1, 1));
+        assert_eq!((end.line, end.col), (1, 3));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Space));
+        assert_eq!((span.start(), span.end(), span.as_str()), (2, 3, " "));
+        assert_eq!((start.line, start.col), (1, 3));
+        assert_eq!((end.line, end.col), (1, 4));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Name));
+        assert_eq!((span.start(), span.end(), span.as_str()), (3, 7, "main"));
+        assert_eq!((start.line, start.col), (1, 4));
+        assert_eq!((end.line, end.col), (1, 8));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, None);
+        assert_eq!((span.start(), span.end(), span.as_str()), (7, 9, "()"));
+        assert_eq!((start.line, start.col), (1, 8));
+        assert_eq!((end.line, end.col), (1, 10));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Space));
+        assert_eq!((span.start(), span.end(), span.as_str()), (9, 10, " "));
+        assert_eq!((start.line, start.col), (1, 10));
+        assert_eq!((end.line, end.col), (1, 11));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, None);
+        assert_eq!((span.start(), span.end(), span.as_str()), (10, 11, "{"));
+        assert_eq!((start.line, start.col), (1, 11));
+        assert_eq!((end.line, end.col), (1, 12));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Space));
+        assert_eq!(
+            (span.start(), span.end(), span.as_str()),
+            (11, 16, "\n    ")
+        );
+        assert_eq!((start.line, start.col), (1, 12));
+        assert_eq!((end.line, end.col), (2, 5));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Name));
+        assert_eq!(
+            (span.start(), span.end(), span.as_str()),
+            (16, 23, "println")
+        );
+        assert_eq!((start.line, start.col), (2, 5));
+        assert_eq!((end.line, end.col), (2, 12));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, None);
+        assert_eq!((span.start(), span.end(), span.as_str()), (23, 25, "!("));
+        assert_eq!((start.line, start.col), (2, 12));
+        assert_eq!((end.line, end.col), (2, 14));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::SimpleString));
+        assert_eq!(
+            (span.start(), span.end(), span.as_str()),
+            (25, 38, "\"Hello World\"")
+        );
+        assert_eq!((start.line, start.col), (2, 14));
+        assert_eq!((end.line, end.col), (2, 27));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, None);
+        assert_eq!((span.start(), span.end(), span.as_str()), (38, 40, ");"));
+        assert_eq!((start.line, start.col), (2, 27));
+        assert_eq!((end.line, end.col), (2, 29));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, Some(Tok::Space));
+        assert_eq!((span.start(), span.end(), span.as_str()), (40, 41, "\n"));
+        assert_eq!((start.line, start.col), (2, 29));
+        assert_eq!((end.line, end.col), (3, 1));
+
+        let (tok, span, (start, end)) = tokens.next().unwrap();
+        assert_eq!(tok, None);
+        assert_eq!((span.start(), span.end(), span.as_str()), (41, 42, "}"));
+        assert_eq!((start.line, start.col), (3, 1));
+        assert_eq!((end.line, end.col), (3, 2));
+
+        assert_eq!(tokens.next(), None);
     }
 
     #[test]
